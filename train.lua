@@ -3,6 +3,19 @@ require 'optim'   -- an optimization package, for online and batch methods
 
 torch.setdefaulttensortype('torch.FloatTensor')
 
+
+-- DSN_fused
+-- fusion DSN2, DSN3, DSN4, DSN5 after apply spatialsoftmax,
+-- output: bz x 5 x H x W 
+-- then feed into logsoftmax, spatial cross entropy   
+-- DSN2: bz x 2 x H x W 
+-- DSN3:  bz x 3 x H x W 
+-- DSN5:  bz x 4 x H x W 
+-- DSN5:  bz x 5 x H x W
+-- scatter gradDSN_Fused to DSN2, DSN3, DSN4, DSN5
+
+
+
 local loss = t.loss
 print '==> Creating Train function ...'
 local model = t.model
@@ -26,11 +39,40 @@ local optimState = optimState or {
 
 print ' | ==> allocating minibatch memory'
 
+local yt_stage2, yt_stage3, yt_stage4, yt_stage5
+local function Yt2Table(yt)
+    yt_stage2 = yt_stage2 or torch.CudaTensor()
+    yt_stage3 = yt_stage3 or torch.CudaTensor()
+    yt_stage4 = yt_stage4 or torch.CudaTensor()
+    yt_stage5 = yt_stage5 or torch.CudaTensor()
+    
+    -- stage 2 
+    yt_stage2:resizeAs(yt)
+    yt_stage2:copy(yt[torch.le(yt, 2)]) -- {1,2}
+    -- stage 3 
+    yt_stage3:resizeAs(yt)
+    yt_stage3:copy(yt[torch.le(yt, 3)]) -- {1, 2, 3}
+
+    -- stage 4 
+    yt_stage4:resizeAs(yt) -- {1, 2, 3}
+    yt_stage4:copy(yt[torch.le(yt, 4)]) -- {1, 2, 3, 4}
+
+    -- stage 5 
+    yt_stage5:resizeAs(yt)
+    yt_stage5:copy(yt[torch.le(yt, 5)]) -- {1, 2, 3, 4}
+
+    return {yt_stage2, yt_stage3, yt_stage4, yt_stage5}
+end 
+
+
 local x
 local yt
+local YTable
 
 local function train(dataloader, epoch)
-    local classes = opt.classes
+    -- 4 stages 
+    local classes = {2, 3, 4, 5}
+
     local dataSize = dataloader:size()
 
     -- print epoch info
@@ -63,13 +105,20 @@ local function train(dataloader, epoch)
     for n, sample in dataloader:run() do
         copyInputs(sample)
         batchSize = yt:size(1)
+        YTable = Yt2Table(yt)
+
         local eval_E = function(w)
             model:zeroGradParameters()
-            local y = model:forward(x)
+            local y = model:forward(x) 
 
-            err = loss:forward(y,yt)            -- updateOutput
+            --[[
+            -- if five stage vgg use the follow code 
+            -- to transform yt to a table of label tensor
+            -- to guide the 5 stage repectively 
+            --]] 
+            err = loss:forward(y,YTable)            -- updateOutput
 
-            local dE_dy = loss:backward(y,yt)   -- updateGradInput
+            local dE_dy = loss:backward(y,YTable)   -- updateGradInput
             model:backward(x,dE_dy)
             return err, dE_dw
         end
@@ -85,12 +134,22 @@ local function train(dataloader, epoch)
         -- image training dataset
         if opt.noConfusion == 'all' then 
             model:evaluate()
-            local y = model:forward(x):transpose(2, 4):transpose(2, 3) -- bz x H x W x 2(the last dimenstion[Prob0,Prob1])
-            y = y:reshape(y:numel()/y:size(4), #classes)
-            local _, predictions = y:max(2)
-            predictions = predictions:view(-1)
-            local k = yt:view(-1)  
-            confusion:batchAdd(predictions, k)
+
+            local y = model:forward(x) -- y is a table of 4 tensors: {bz X H x W x 2, bz X H X W x 3, 
+                                       -- bz x H x W x 4, bz x H x W x 5}
+
+            for i, stage_y in ipairs(y) 
+                stage_y:transpose(2, 4):transpose(2, 3) -- bz x H x W x 2(the last dimenstion[Prob0,Prob1])
+                stage_y = stage_y:reshape(stage_y:numel()/stage_y:size(4), classes[i])
+                local _, predictions = stage_y:max(2)
+                predictions = predictions:view(-1)
+
+                local k = YTable[1]:view(-1)
+
+                confusion:batchAdd(predictions, k)
+
+            end 
+
             model:training()
         end
         totalerr = totalerr + err*batchSize

@@ -109,7 +109,9 @@ DSN5 = nn.SpatialConvolution(128, 64, 1, 1, 1, 1, 0, 0)(DSN5)
 DSN5 = nn.SpatialMaxUnpooling(pool[1])(DSN5)
 DSN5 = nn.SpatialConvolution(64, 5, 1, 1, 1, 1, 0, 0)(DSN5)
 
+
 local model = nn.gModule({input}, {DSN2, DSN3, DSN4, DSN5})
+-- scatter grad_DSN_fused to DSN2, DSN3, DSN4, DSN5
 
 -- model:cuda()
 
@@ -124,6 +126,11 @@ optnet.optimizeMemory(model, sampleInput, {inplace = true, mode = 'training'})
 -- output = {DSN2, DSN3, DSN4, DSN5}
 -- label = {gt2, gt3, gt4, gt5}
 local loss = nn.ParallelCriterion(false) -- flase means not repeate target 
+--[[
+   It does a LogSoftMax on the input (over the channel dimension),
+   so no LogSoftMax is needed in the network at the end
+--]]
+
 loss:add(cudnn.SpatialCrossEntropyCriterion()) -- for DSN2
 loss:add(cudnn.SpatialCrossEntropyCriterion()) -- for DSN3
 loss:add(cudnn.SpatialCrossEntropyCriterion()) -- for DSN4

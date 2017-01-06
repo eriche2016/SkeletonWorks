@@ -109,7 +109,7 @@ function DataLoader:run()
                   -- 60=< < 150: 5 
                   local mask_ge60_lt50 = torch.cmul(torch.ge(target, 60.0), torch.lt(target, 150.0)) 
                   
-
+                  -- make label map
                   target[mask_lt1_gt150] = 1 -- background 
                   target[mask_ge1_lt10] = 2 
                   target[mask_ge10_lt26] = 3
